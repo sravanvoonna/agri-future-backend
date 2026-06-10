@@ -1,0 +1,13 @@
+# Python cached files
+__pycache__/
+*.pyc
+
+# Virtual environment
+venv/
+
+# Environment configurations containing secrets
+.env
+
+# Local database files
+agriculture.db
+instance/
