@@ -32,6 +32,7 @@ class Crop(db.Model):
     water_requirement = db.Column(db.String(50), nullable=False)
     yield_val = db.Column(db.String(100), name="yield", nullable=False) # Maps to yield in DB
     image_url = db.Column(db.String(255), nullable=True)
+    msp = db.Column(db.String(100), nullable=True)
     
     # Relationships
     diseases = db.relationship('Disease', backref='crop', lazy=True, cascade="all, delete-orphan")
@@ -46,6 +47,7 @@ class Crop(db.Model):
             "season": self.season,
             "water_requirement": self.water_requirement,
             "yield": self.yield_val,
+            "msp": self.msp,
             "state_id": self.states[0].id if self.states else None,
             "state_name": self.states[0].state_name if self.states else None,
             "state_ids": [s.id for s in self.states],

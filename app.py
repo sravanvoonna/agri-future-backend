@@ -1,6 +1,8 @@
 import os
 import io
 import json
+import base64
+import requests
 from datetime import datetime
 from flask import Flask, jsonify, request
 from flask_cors import CORS
@@ -14,10 +16,34 @@ from seed import seed_database
 # Load environment variables
 load_dotenv(override=True)
 
-# Configure Gemini API
+# Configure Gemini API (Legacy fallback)
 gemini_api_key = os.getenv("GEMINI_API_KEY")
 if gemini_api_key:
     genai.configure(api_key=gemini_api_key)
+
+# Configure Azure OpenAI API
+azure_openai_key = os.getenv("AZURE_OPENAI_KEY")
+azure_openai_endpoint = os.getenv("AZURE_OPENAI_ENDPOINT")
+azure_openai_deployment = os.getenv("AZURE_OPENAI_DEPLOYMENT")
+azure_openai_api_version = os.getenv("AZURE_OPENAI_API_VERSION")
+
+def call_azure_openai(messages, temperature=0.7):
+    if not azure_openai_key or not azure_openai_endpoint:
+        raise Exception("Azure OpenAI is not configured in the backend .env file.")
+        
+    url = f"{azure_openai_endpoint.rstrip('/')}/openai/deployments/{azure_openai_deployment}/chat/completions?api-version={azure_openai_api_version}"
+    headers = {
+        "api-key": azure_openai_key,
+        "Content-Type": "application/json"
+    }
+    payload = {
+        "messages": messages,
+        "temperature": temperature
+    }
+    response = requests.post(url, headers=headers, json=payload)
+    if response.status_code != 200:
+        raise Exception(f"Azure OpenAI API returned error {response.status_code}: {response.text}")
+    return response.json()["choices"][0]["message"]["content"]
 
 
 app = Flask(__name__)
@@ -53,6 +79,29 @@ def log_activity(action, status="Success"):
 
 # Setup database & seed automatically on startup if empty
 with app.app_context():
+    db_needs_reset = False
+    try:
+        from sqlalchemy import inspect
+        inspector = inspect(db.engine)
+        if 'crops' in inspector.get_table_names():
+            columns = [c['name'] for c in inspector.get_columns('crops')]
+            if 'msp' not in columns:
+                db_needs_reset = True
+                print("Database schema out of date (missing 'msp' column). Resetting database...")
+    except Exception as e:
+        print("Error checking database schema:", e)
+
+    if db_needs_reset:
+        try:
+            db.drop_all()
+            db_path = os.path.join(os.path.dirname(__file__), "agriculture.db")
+            if os.path.exists(db_path):
+                # Close connection first if needed, but drop_all is usually enough.
+                # Just in case, try to delete the file
+                pass
+        except Exception as e:
+            print("Error dropping tables:", e)
+
     db.create_all()
     # If no states exist, assume DB is unseeded
     if State.query.first() is None:
@@ -179,7 +228,8 @@ def create_crop():
             season=data.get("season", "Kharif"),
             water_requirement=data.get("water_requirement", "Medium"),
             yield_val=data.get("yield", "N/A"),
-            image_url=data.get("image_url") or f"/api/placeholder/400/300?crop={data['crop_name'].lower().replace(' ', '_')}"
+            image_url=data.get("image_url") or f"/api/placeholder/400/300?crop={data['crop_name'].lower().replace(' ', '_')}",
+            msp=data.get("msp", "N/A")
         )
         db.session.add(new_crop)
         
@@ -223,6 +273,8 @@ def update_crop(id):
             crop.water_requirement = data["water_requirement"]
         if "yield" in data:
             crop.yield_val = data["yield"]
+        if "msp" in data:
+            crop.msp = data["msp"]
         if "image_url" in data:
             crop.image_url = data["image_url"]
             
@@ -486,9 +538,9 @@ def delete_chemical(id):
 
 @app.route("/api/gemini/diagnose", methods=["POST"])
 def gemini_diagnose():
-    if not gemini_api_key:
+    if not azure_openai_key:
         return jsonify({
-            "error": "Gemini API key is not configured in the backend .env file.",
+            "error": "Azure OpenAI key is not configured in the backend .env file.",
             "code": "API_KEY_MISSING"
         }), 400
 
@@ -499,12 +551,14 @@ def gemini_diagnose():
     crop_name = request.form.get("crop_name", "unknown plant")
 
     try:
-        # Load image
+        # Load image bytes
         img_bytes = image_file.read()
         image = Image.open(io.BytesIO(img_bytes))
-
-        # Initialize model
-        model = genai.GenerativeModel('gemini-2.5-flash')
+        img_format = image.format or "JPEG"
+        img_mime = f"image/{img_format.lower()}"
+        
+        # Base64 encode the image
+        base64_image = base64.b64encode(img_bytes).decode('utf-8')
 
         prompt = f"""
         You are an expert plant pathologist. 
@@ -525,8 +579,25 @@ def gemini_diagnose():
         }}
         """
 
-        response = model.generate_content([prompt, image])
-        response_text = response.text.strip()
+        messages = [
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "text",
+                        "text": prompt
+                    },
+                    {
+                        "type": "image_url",
+                        "image_url": {
+                            "url": f"data:{img_mime};base64,{base64_image}"
+                        }
+                    }
+                ]
+            }
+        ]
+
+        response_text = call_azure_openai(messages, temperature=0.2).strip()
         
         # Strip code fences if the model included them anyway
         if response_text.startswith("```"):
@@ -546,45 +617,173 @@ def gemini_diagnose():
 
 @app.route("/api/gemini/chat", methods=["POST"])
 def gemini_chat():
-    if not gemini_api_key:
+    if not azure_openai_key:
         return jsonify({
-            "error": "Gemini API key is not configured in the backend .env file.",
+            "error": "Azure OpenAI key is not configured in the backend .env file.",
             "code": "API_KEY_MISSING"
         }), 400
 
     data = request.json or {}
     message = data.get("message")
     history = data.get("history") or [] # List of {"role": "user"|"model", "parts": [str]}
+    language_code = data.get("language", "en-IN")
 
     if not message:
         return jsonify({"error": "Missing 'message' parameter."}), 400
 
     try:
-        model = genai.GenerativeModel('gemini-2.5-flash')
-        
-        # Reconstruct chat session with system instruction
-        system_instruction = """
+        lang_instruction = "Respond strictly in English. Write in clear, standard English."
+        if language_code == "hi-IN":
+            lang_instruction = """
+            Respond strictly in Hindi. Your output MUST be entirely in the Hindi language, using the Devanagari script.
+            Do not use robotic, direct English-to-Hindi translations. Use warm, natural, humanized, conversational Hindi as spoken by farmers in North India (e.g., use greetings like 'राम राम भाई जी' or 'नमस्ते किसान भाइयों', and use everyday agricultural words like 'धान' or 'चावल की फसल', 'खाद', 'सिंचाई'). Keep it simple, friendly, and easy to understand.
+            """
+        elif language_code == "te-IN":
+            lang_instruction = """
+            Respond strictly in Telugu. Your output MUST be entirely in the Telugu language, using the Telugu script.
+            Do not use robotic, direct English-to-Telugu translations (e.g., NEVER use 'బియ్యం పంట' because 'బియ్యం' means uncooked rice grains; always use 'వరి' or 'వరి పంట' for the crop in the field).
+            Use natural, warm, humanized, conversational Telugu as spoken by real farmers in Andhra Pradesh and Telangana. Add polite suffixes like 'అండీ' (andi) to keep the tone friendly (e.g., 'నమస్తే అండీ', 'సలహాలు ఇక్కడ ఉన్నాయి చూడండి', 'చేయండి అండీ'). Explain advice in a simple, easy, neighborly manner. Do not write Telugu words in English characters.
+            """
+            
+        system_instruction = f"""
         You are 'CropCare AI', a friendly, knowledgeable agricultural chatbot assistant for farmers in India.
         Provide practical, clear farming advice about crops, soil, climate, fertilizers, and disease management.
-        Always match the language of the user's input. If the user asks a question in English, respond strictly in English. If they write in Hindi, respond in Hindi. If they write in Telugu, Tamil, Bengali, etc., respond in that language.
+        
+        Language Instruction:
+        {lang_instruction}
+        
         Keep your advice actionable and focused on low-cost and organic alternatives where possible.
         """
         
-        # Reconstruct history or send context directly
-        context_prompt = f"{system_instruction}\n\nChat History:\n"
+        messages = [{"role": "system", "content": system_instruction}]
+        
         for h in history[-10:]: # Keep last 10 messages for context
-            role = "User" if h.get("role") == "user" else "Assistant"
-            context_prompt += f"{role}: {h.get('parts', [''])[0]}\n"
+            role = "user" if h.get("role") == "user" else "assistant"
+            parts = h.get("parts")
+            content = parts[0] if isinstance(parts, list) and len(parts) > 0 else ""
+            messages.append({"role": role, "content": content})
+            
+        messages.append({"role": "user", "content": message})
         
-        context_prompt += f"User: {message}\nAssistant:"
-        
-        response = model.generate_content(context_prompt)
-        reply = response.text.strip()
-        
-        return jsonify({"reply": reply})
+        reply = call_azure_openai(messages, temperature=0.7)
+        return jsonify({"reply": reply.strip()})
         
     except Exception as e:
         return jsonify({"error": f"Failed to get reply: {str(e)}"}), 500
+
+
+@app.route("/api/gemini/schedule", methods=["POST"])
+def gemini_schedule():
+    if not azure_openai_key:
+        return jsonify({
+            "error": "Azure OpenAI key is not configured in the backend .env file.",
+            "code": "API_KEY_MISSING"
+        }), 400
+
+    data = request.json or {}
+    soil_type = data.get("soil_type")
+    crop_type = data.get("crop_type")
+    acres = data.get("acres")
+    irrigation_type = data.get("irrigation_type")
+    state_name = data.get("state_name")
+    previous_crop = data.get("previous_crop")
+    previous_yield = data.get("previous_yield")
+
+    if not crop_type or not soil_type:
+        return jsonify({"error": "Missing 'crop_type' or 'soil_type' parameters."}), 400
+
+    try:
+        prompt = f"""
+        You are an expert agronomist advisor in India. A farmer wants a customized crop cultivation schedule and suggestions based on their farm details.
+        
+        Farmer Profile:
+        - Crop to grow: {crop_type}
+        - Soil type: {soil_type}
+        - Farm size: {acres} acres
+        - Irrigation method: {irrigation_type}
+        - Location (State/Region): {state_name}
+        - Previous crop grown: {previous_crop}
+        - Previous yield obtained: {previous_yield}
+        
+        Generate a highly structured, comprehensive, and practical cultivation schedule and suggestions.
+        Provide the response STRICTLY as a raw JSON object (with no ```json code fences or markdown formatting) containing the following structure:
+        {{
+            "crop_schedule": [
+                {{
+                    "phase": "Land Preparation & Pre-sowing",
+                    "timeline": "Day -10 to Day 0",
+                    "activities": [
+                        "Deep plow the field 2-3 times to expose soil pathogens to sun.",
+                        "Incorporate 5-10 tons of well-decomposed Farmyard Manure (FYM) per acre."
+                    ],
+                    "irrigation_advice": "Apply pre-sowing irrigation if soil moisture is low.",
+                    "fertilizer_dosage": "Apply baseline Phosphorus (SSP) at 50 kg per acre."
+                }},
+                {{
+                    "phase": "Sowing / Transplanting",
+                    "timeline": "Day 1 to Day 5",
+                    "activities": [
+                        "Treat seeds with Trichoderma viride at 5g/kg to prevent root rot.",
+                        "Sow seeds at a depth of 2-3 cm with spacing of 30x10 cm."
+                    ],
+                    "irrigation_advice": "Maintain light moisture; do not waterlog the soil.",
+                    "fertilizer_dosage": "Apply 20 kg Urea per acre as basal dose."
+                }},
+                {{
+                    "phase": "Vegetative Growth & Weeding",
+                    "timeline": "Day 15 to Day 45",
+                    "activities": [
+                        "Perform hand weeding or apply selective pre-emergence herbicide.",
+                        "Monitor closely for early signs of leaf spot or insect pests."
+                    ],
+                    "irrigation_advice": "Irrigate at critical crop stages (tillering/branching).",
+                    "fertilizer_dosage": "Top dress with 30 kg Urea per acre after first weeding."
+                }},
+                {{
+                    "phase": "Flowering & Harvesting",
+                    "timeline": "Day 50 to Day 90",
+                    "activities": [
+                        "Harvest when 80-90% of the grains/pods turn golden brown.",
+                        "Dry the harvested crop in clean yards to reach safe moisture levels."
+                    ],
+                    "irrigation_advice": "Stop irrigation 10-15 days before harvest.",
+                    "fertilizer_dosage": "No chemical fertilizers at this stage. Foliar spray of Potassium if needed."
+                }}
+            ],
+            "general_suggestions": [
+                "Since you grew {previous_crop} previously, ensure crop rotation is maintained to prevent pest build-up.",
+                "Leverage organic mulching to conserve moisture, which is highly suited for your {irrigation_type} system."
+            ],
+            "soil_and_fertilizer_tips": [
+                "Your {soil_type} has specific drainage qualities. Work on improving soil organic carbon.",
+                "Perform a soil health test annually to calibrate NPK application accurately."
+            ],
+            "warnings": [
+                "High risk of waterlogging on {soil_type} if flood irrigation is overdone.",
+                "Watch out for crop-specific pests that transfer from {previous_crop}."
+            ]
+        }}
+        
+        Ensure that all dates, dosages, and warnings are highly realistic for Indian agriculture and tailored to {acres} acres of land.
+        """
+
+        messages = [{"role": "user", "content": prompt}]
+        response_text = call_azure_openai(messages, temperature=0.3).strip()
+        
+        # Strip code fences if the model included them anyway
+        if response_text.startswith("```"):
+            response_text = "\n".join(response_text.split("\n")[1:])
+        if response_text.endswith("```"):
+            response_text = "\n".join(response_text.split("\n")[:-1])
+            
+        response_text = response_text.strip()
+        
+        result_json = json.loads(response_text)
+        log_activity(f"AI generated cultivation schedule for {crop_type} on {soil_type}")
+        return jsonify(result_json)
+        
+    except Exception as e:
+        return jsonify({"error": f"Failed to generate cultivation schedule: {str(e)}"}), 500
 
 
 if __name__ == "__main__":
