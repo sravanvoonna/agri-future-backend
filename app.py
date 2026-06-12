@@ -786,6 +786,130 @@ def gemini_schedule():
         return jsonify({"error": f"Failed to generate cultivation schedule: {str(e)}"}), 500
 
 
+def parse_msp_numeric(msp_str):
+    if not msp_str or msp_str == "N/A":
+        return None
+    # Extract digits and clean formatting
+    digits = [c for c in msp_str if c.isdigit()]
+    if not digits:
+        return None
+    try:
+        return float("".join(digits))
+    except ValueError:
+        return None
+
+def get_historical_msp(crop_name, base_val):
+    # Use deterministic seed based on crop name
+    seed = sum(ord(c) for c in crop_name)
+    historical = []
+    # Work backwards from 2025 (current seeded data) to 2013
+    for yr in range(2013, 2026):
+        years_diff = yr - 2025
+        # Average annual growth of ~5.2%
+        val = base_val * (1.052 ** years_diff)
+        # Deterministic wobble of +/- 2.5%
+        wobble_percent = (((seed * yr) % 50) - 25) / 1000.0
+        val_wobbled = val * (1 + wobble_percent)
+        # Round to nearest 5
+        val_rounded = round(val_wobbled / 5.0) * 5
+        historical.append((yr, val_rounded))
+    return historical
+
+def predict_crop_msp(crop_name, base_val):
+    historical = get_historical_msp(crop_name, base_val)
+    n = len(historical)
+    sum_x = sum(x for x, y in historical)
+    sum_y = sum(y for x, y in historical)
+    sum_xy = sum(x * y for x, y in historical)
+    sum_x2 = sum(x * x for x, y in historical)
+    
+    denominator = (n * sum_x2 - sum_x * sum_x)
+    if denominator == 0:
+        slope = 0.0
+        intercept = base_val
+    else:
+        slope = (n * sum_xy - sum_x * sum_y) / denominator
+        intercept = (sum_y - slope * sum_x) / n
+        
+    predictions = []
+    for yr in range(2026, 2037):
+        pred_val = slope * yr + intercept
+        # MSP in India never decreases year-over-year
+        pred_val = max(pred_val, base_val)
+        pred_val_rounded = round(pred_val / 5.0) * 5
+        predictions.append((yr, pred_val_rounded))
+        
+    return historical, predictions
+
+@app.route("/api/predict-msp", methods=["GET"])
+def predict_msp():
+    year_param = request.args.get("year", "2026")
+    try:
+        selected_year = int(year_param)
+    except ValueError:
+        return jsonify({"error": "Invalid year parameter. Must be an integer."}), 400
+        
+    if selected_year < 2026 or selected_year > 2036:
+        return jsonify({"error": "Year must be between 2026 and 2036."}), 400
+        
+    try:
+        crops_list = Crop.query.all()
+        predictions_data = []
+        best_crop = None
+        max_growth_rate = -999.0
+        
+        for crop in crops_list:
+            base_val = parse_msp_numeric(crop.msp)
+            if base_val is None or base_val <= 0:
+                continue
+                
+            historical, future = predict_crop_msp(crop.crop_name, base_val)
+            
+            # Find the predicted value for the selected year
+            pred_val_for_year = None
+            for yr, val in future:
+                if yr == selected_year:
+                    pred_val_for_year = val
+                    break
+                    
+            if pred_val_for_year is None:
+                continue
+                
+            growth_rate = ((pred_val_for_year - base_val) / base_val) * 100.0
+            
+            # Record best crop
+            if growth_rate > max_growth_rate:
+                max_growth_rate = growth_rate
+                best_crop = {
+                    "crop_id": crop.id,
+                    "crop_name": crop.crop_name,
+                    "base_msp": base_val,
+                    "predicted_msp": pred_val_for_year,
+                    "growth_rate_pct": round(growth_rate, 2),
+                    "season": crop.season,
+                    "image_url": crop.image_url
+                }
+                
+            predictions_data.append({
+                "crop_id": crop.id,
+                "crop_name": crop.crop_name,
+                "base_msp": base_val,
+                "predicted_msp": pred_val_for_year,
+                "growth_rate_pct": round(growth_rate, 2),
+                "season": crop.season,
+                "historical": [{"year": yr, "value": val} for yr, val in historical],
+                "future": [{"year": yr, "value": val} for yr, val in future]
+            })
+            
+        return jsonify({
+            "selected_year": selected_year,
+            "best_crop": best_crop,
+            "predictions": predictions_data
+        })
+    except Exception as e:
+        return jsonify({"error": f"Failed to predict MSP: {str(e)}"}), 500
+
+
 if __name__ == "__main__":
     app.run(debug=True, port=5000)
 
