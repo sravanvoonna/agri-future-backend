@@ -1,5 +1,5 @@
 import os
-from models import db, State, Crop, Soil, CropSoil, Disease, Chemical
+from models import db, State, Crop, Soil, CropSoil, Disease, Chemical, NewsUpdate
 
 def seed_database():
     # 1. Clear existing data
@@ -9,6 +9,7 @@ def seed_database():
     db.session.query(Crop).delete()
     db.session.query(Soil).delete()
     db.session.query(State).delete()
+    db.session.query(NewsUpdate).delete()
     db.session.commit()
 
     print("Cleared existing tables.")
@@ -409,6 +410,64 @@ def seed_database():
 
     db.session.commit()
     print(f"Seeded {len(diseases_chemicals_raw)} Diseases and their corresponding {len(diseases_chemicals_raw)} Chemicals.")
+
+    # 6. Seed News Updates (5 realistic articles)
+    news_data = [
+        {
+            "title": "PM-KISAN 17th Installment of ₹2,000 Transferred to 9.2 Crore Farmers",
+            "content": "The Prime Minister has released the 17th installment of the Pradhan Mantri Kisan Samman Nidhi (PM-KISAN) scheme. Over ₹20,000 crores have been directly transferred to the bank accounts of more than 9.2 crore eligible farmers across India. Farmers can check their status on the official PM-KISAN portal using their Aadhaar card. This assistance helps farmers prepare for Kharif sowing.",
+            "category": "Scheme",
+            "published_date": "2026-06-15",
+            "source": "Ministry of Agriculture & Farmers Welfare",
+            "image_url": "https://images.unsplash.com/photo-1593113598332-cd288d649433?auto=format&fit=crop&q=80&w=800"
+        },
+        {
+            "title": "IMD Issues Heavy Rainfall Advisory for Maharashtra, Telangana, and Andhra Pradesh",
+            "content": "The India Meteorological Department (IMD) has issued an orange alert for several agricultural zones in Western and Southern India. A low-pressure area over the Bay of Bengal is expected to bring widespread heavy monsoon rains. Farmers are advised to delay sowing of cotton and soyabean in waterlogged fields and ensure proper drainage channels in orchards.",
+            "category": "Weather",
+            "published_date": "2026-06-16",
+            "source": "India Meteorological Department (IMD)",
+            "image_url": "https://images.unsplash.com/photo-1534274988757-a28bf1a57c17?auto=format&fit=crop&q=80&w=800"
+        },
+        {
+            "title": "Cotton Prices Surge by 8% in Western Indian Mandis Amid Export Demand",
+            "content": "Cotton prices have surged in major mandis of Gujarat and Maharashtra, driven by strong export orders. The average price per quintal reached ₹7,800, which is significantly above the MSP of ₹7,121. Cotton sowing has dipped slightly due to delayed rainfall, driving spot market values higher. Analysts advise farmers to sell in tranches to maximize gains.",
+            "category": "Market Trend",
+            "published_date": "2026-06-14",
+            "source": "AgriMarket Intelligence India",
+            "image_url": "https://images.unsplash.com/photo-1509099836639-18ba1795216d?auto=format&fit=crop&q=80&w=800"
+        },
+        {
+            "title": "Central Government Announces 50% Subsidy on Agricultural Drones",
+            "content": "To promote smart and precision agriculture, the government has announced a 50% financial subsidy (up to ₹5 lakhs) for agricultural cooperatives, FPOs, and custom hiring centers to purchase drone setups. Drones reduce chemical usage and protect farmers from direct contact with pesticides during spraying operations. Applications can be submitted through state portals.",
+            "category": "Technology",
+            "published_date": "2026-06-12",
+            "source": "Department of Agriculture",
+            "image_url": "https://images.unsplash.com/photo-1508614589041-895b88991e3e?auto=format&fit=crop&q=80&w=800"
+        },
+        {
+            "title": "How to Correctly Apply Jeevamrutha Organic Fertilizer for Soil Health",
+            "content": "Agricultural scientists have published a guide for preparation and application of Jeevamrutha. Made from local cow dung, cow urine, pulse flour, and virgin soil, Jeevamrutha stimulates microbial activity, enhancing crop nutrient absorption. Apply 200 liters per acre twice a month alongside standard irrigation channels for best organic yield results.",
+            "category": "General",
+            "published_date": "2026-06-10",
+            "source": "ICAR Advisory Bulletin",
+            "image_url": "https://images.unsplash.com/photo-1523348837708-15d4a09cfac2?auto=format&fit=crop&q=80&w=800"
+        }
+    ]
+
+    for item in news_data:
+        news = NewsUpdate(
+            title=item["title"],
+            content=item["content"],
+            category=item["category"],
+            published_date=item["published_date"],
+            source=item["source"],
+            image_url=item["image_url"]
+        )
+        db.session.add(news)
+    
+    db.session.commit()
+    print(f"Seeded {len(news_data)} News Updates.")
     print("Database seeding completed successfully.")
 
 if __name__ == "__main__":

@@ -144,3 +144,26 @@ class Chemical(db.Model):
             "disease_name": self.disease.disease_name if self.disease else None,
             "crop_name": self.disease.crop.crop_name if self.disease and self.disease.crop else None
         }
+
+
+class NewsUpdate(db.Model):
+    __tablename__ = 'news_updates'
+    
+    id = db.Column(db.Integer, primary_key=True)
+    title = db.Column(db.String(255), nullable=False, unique=True)
+    content = db.Column(db.Text, nullable=False)
+    category = db.Column(db.String(50), nullable=False)  # Scheme, Weather, Market Trend, Technology, General
+    published_date = db.Column(db.String(50), nullable=False)
+    source = db.Column(db.String(100), nullable=True)
+    image_url = db.Column(db.String(255), nullable=True)
+
+    def to_dict(self):
+        return {
+            "id": self.id,
+            "title": self.title,
+            "content": self.content,
+            "category": self.category,
+            "published_date": self.published_date,
+            "source": self.source,
+            "image_url": self.image_url
+        }

@@ -10,7 +10,7 @@ from dotenv import load_dotenv
 from PIL import Image
 import google.generativeai as genai
 
-from models import db, State, Crop, Soil, CropSoil, Disease, Chemical
+from models import db, State, Crop, Soil, CropSoil, Disease, Chemical, NewsUpdate
 from seed import seed_database
 
 # Load environment variables
@@ -61,6 +61,59 @@ app.config["SQLALCHEMY_TRACK_MODIFICATIONS"] = False
 
 db.init_app(app)
 
+# Load translations cache
+translations_cache = {}
+try:
+    cache_path = os.path.join(os.path.dirname(__file__), "translations_cache.json")
+    if os.path.exists(cache_path):
+        with open(cache_path, "r", encoding="utf-8") as f:
+            translations_cache = json.load(f)
+        print(f"Loaded {len(translations_cache)} translations from translations_cache.json")
+    else:
+        print("translations_cache.json not found. Database dynamic translation will not be active.")
+except Exception as e:
+    print("Error loading translations_cache.json:", e)
+
+def translate_value(val, lang):
+    if not lang or lang == "en":
+        return val
+    if isinstance(val, str):
+        stripped = val.strip()
+        if stripped in translations_cache:
+            translations = translations_cache[stripped]
+            if lang in translations:
+                l_space = len(val) - len(val.lstrip())
+                r_space = len(val) - len(val.rstrip())
+                translated = (val[:l_space] if l_space else "") + translations[lang] + (val[-r_space:] if r_space else "")
+                return translated
+        return val
+    elif isinstance(val, list):
+        return [translate_value(item, lang) for item in val]
+    elif isinstance(val, dict):
+        return {k: translate_value(v, lang) for k, v in val.items()}
+    else:
+        return val
+
+@app.after_request
+def translate_response(response):
+    if response.mimetype == 'application/json':
+        lang = request.args.get('lang')
+        if lang:
+            if lang.startswith('hi'): lang = 'hi'
+            elif lang.startswith('te'): lang = 'te'
+            elif lang.startswith('mr'): lang = 'mr'
+            
+            if lang in ['hi', 'te', 'mr']:
+                try:
+                    data = response.get_json()
+                    if data is not None:
+                        translated_data = translate_value(data, lang)
+                        response.set_data(json.dumps(translated_data, ensure_ascii=False))
+                except Exception as e:
+                    app.logger.error(f"Error in translating response: {e}")
+    return response
+
+
 # In-memory activity log for admin actions
 activity_logs = [
     {"timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"), "action": "Database initialized", "status": "Success"},
@@ -76,6 +129,108 @@ def log_activity(action, status="Success"):
     # Keep only the latest 30 logs
     if len(activity_logs) > 30:
         activity_logs.pop()
+
+def sync_pib_news():
+    import urllib.request
+    import xml.etree.ElementTree as ET
+    from datetime import datetime
+    import re
+    import traceback
+    
+    agri_keywords = {
+        # English keywords
+        'agriculture', 'farmer', 'farming', 'crop', 'fertilizer', 'monsoon', 
+        'mandi', 'irrigation', 'soil', 'wheat', 'paddy', 'kisan', 'msp', 
+        'horticulture', 'pesticide', 'organic farming', 'seed', 'harvest',
+        'cotton', 'pulses', 'soyabean', 'drought', 'rainfall', 'fpo',
+        # Hindi keywords
+        'कृषि', 'किसान', 'खेती', 'फसल', 'उर्वरक', 'खाद', 'पराली', 'सिंचाई', 
+        'सब्जी', 'बागवानी', 'मंडी', 'एमएसपी', 'सहकारिता', 'मौसम', 'वर्षा', 
+        'बारिश', 'बाढ़', 'चक्रवात', 'मानसून', 'योजना', 'सब्सिडी', 'पीएम-किसान', 
+        'कल्याण', 'कोष', 'लाभ', 'कीमत', 'मूल्य', 'बाजार', 'व्यापार', 'निर्यात', 
+        'आयात', 'ड्रोन', 'प्रौद्योगिकी', 'तकनीक', 'एआई', 'डिजिटल', 'स्मार्ट'
+    }
+    
+    url = 'https://pib.gov.in/RssMain.aspx?ModId=6&Lang=1'
+    req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
+    
+    try:
+        import ssl
+        context = ssl._create_unverified_context()
+        with urllib.request.urlopen(req, timeout=8, context=context) as response:
+            xml_data = response.read()
+            root = ET.fromstring(xml_data)
+            items = root.findall('.//item')
+            
+            added_count = 0
+            for item in items:
+                title_el = item.find('title')
+                title = (title_el.text if title_el is not None else "") or ""
+                
+                link_el = item.find('link')
+                link = (link_el.text if link_el is not None else "") or ""
+                
+                desc_el = item.find('description')
+                description = (desc_el.text if desc_el is not None else "") or ""
+                
+                pub_el = item.find('pubDate')
+                pub_date_str = (pub_el.text if pub_el is not None else "") or ""
+                
+                combined_text = (title + " " + description).lower()
+                is_agri = any(keyword.lower() in combined_text for keyword in agri_keywords)
+                
+                if is_agri:
+                    existing = NewsUpdate.query.filter_by(title=title).first()
+                    if not existing:
+                        clean_desc = re.sub('<[^<]+?>', '', description).strip()
+                        
+                        category = "General"
+                        # English & Hindi category mapping
+                        if any(x in combined_text for x in ["monsoon", "rain", "weather", "flood", "cyclone", "imd", "मौसम", "वर्षा", "बारिश", "बाढ़", "चक्रवात", "मानसून"]):
+                            category = "Weather"
+                        elif any(x in combined_text for x in ["scheme", "subsidy", "pm-kisan", "welfare", "fund", "benefit", "योजना", "सब्सिडी", "पीएम-किसान", "कल्याण", "कोष", "लाभ"]):
+                            category = "Scheme"
+                        elif any(x in combined_text for x in ["mandi", "price", "msp", "market", "trade", "export", "import", "मंडी", "कीमत", "मूल्य", "एमएसपी", "बाजार", "व्यापार", "निर्यात", "आयात"]):
+                            category = "Market Trend"
+                        elif any(x in combined_text for x in ["drone", "technology", "precision", "ai", "digital", "smart", "ड्रोन", "प्रौद्योगिकी", "तकनीक", "एआई", "डिजिटल", "स्मार्ट"]):
+                            category = "Technology"
+                            
+                        image_map = {
+                            "Scheme": "https://images.unsplash.com/photo-1593113598332-cd288d649433?auto=format&fit=crop&q=80&w=800",
+                            "Weather": "https://images.unsplash.com/photo-1534274988757-a28bf1a57c17?auto=format&fit=crop&q=80&w=800",
+                            "Market Trend": "https://images.unsplash.com/photo-1509099836639-18ba1795216d?auto=format&fit=crop&q=80&w=800",
+                            "Technology": "https://images.unsplash.com/photo-1508614589041-895b88991e3e?auto=format&fit=crop&q=80&w=800",
+                            "General": "https://images.unsplash.com/photo-1523348837708-15d4a09cfac2?auto=format&fit=crop&q=80&w=800"
+                        }
+                        image_url = image_map.get(category, image_map["General"])
+                        
+                        pub_date = datetime.now().strftime('%Y-%m-%d')
+                        if pub_date_str:
+                            try:
+                                parsed_date = datetime.strptime(pub_date_str.split(',')[1].strip()[:11], '%d %b %Y')
+                                pub_date = parsed_date.strftime('%Y-%m-%d')
+                            except Exception:
+                                pub_date = pub_date_str
+                            
+                        new_update = NewsUpdate(
+                            title=title,
+                            content=clean_desc or "Read full details on the PIB website.",
+                            category=category,
+                            published_date=pub_date,
+                            source="Press Information Bureau (PIB)",
+                            image_url=image_url
+                        )
+                        db.session.add(new_update)
+                        added_count += 1
+            
+            if added_count > 0:
+                db.session.commit()
+                print(f"PIB News Sync: Synced {added_count} new articles.")
+                return added_count
+    except Exception as e:
+        traceback.print_exc()
+        print("PIB News Sync Error:", e)
+    return 0
 
 # Setup database & seed automatically on startup if empty
 with app.app_context():
@@ -108,6 +263,13 @@ with app.app_context():
         print("Database is empty. Seeding realistic agricultural dataset...")
         seed_database()
 
+    # Sync latest news on startup
+    try:
+        print("Syncing live PIB agricultural news...")
+        sync_pib_news()
+    except Exception as startup_err:
+        print("Failed to sync news on startup:", startup_err)
+
 # Health check
 @app.route("/")
 def index():
@@ -128,6 +290,7 @@ def get_admin_stats():
             "total_soils": Soil.query.count(),
             "total_diseases": Disease.query.count(),
             "total_chemicals": Chemical.query.count(),
+            "total_news": NewsUpdate.query.count(),
             "activity_logs": activity_logs
         })
     except Exception as e:
@@ -679,13 +842,23 @@ def gemini_schedule():
     state_name = data.get("state_name")
     previous_crop = data.get("previous_crop")
     previous_yield = data.get("previous_yield")
+    expected_yield = data.get("expected_yield")
+    language = data.get("language", "en")
 
     if not crop_type or not soil_type:
         return jsonify({"error": "Missing 'crop_type' or 'soil_type' parameters."}), 400
 
+    lang_map = {
+        "te": "Telugu (తెలుగు)",
+        "hi": "Hindi (हिन्दी)",
+        "mr": "Marathi (मराठी)",
+        "en": "English"
+    }
+    language_name = lang_map.get(language, "English")
+
     try:
         prompt = f"""
-        You are an expert agronomist advisor in India. A farmer wants a customized crop cultivation schedule and suggestions based on their farm details.
+        You are an expert agronomist advisor in India. A farmer wants a customized crop cultivation schedule, suggestions, and a target feasibility check based on their farm details.
         
         Farmer Profile:
         - Crop to grow: {crop_type}
@@ -695,10 +868,15 @@ def gemini_schedule():
         - Location (State/Region): {state_name}
         - Previous crop grown: {previous_crop}
         - Previous yield obtained: {previous_yield}
+        - Target/Expected yield to achieve: {expected_yield}
         
         Generate a highly structured, comprehensive, and practical cultivation schedule and suggestions.
         Provide the response STRICTLY as a raw JSON object (with no ```json code fences or markdown formatting) containing the following structure:
         {{
+            "target_yield_feasibility": {{
+                "status": "Highly Feasible / Ambitious but Achievable / High Risk of Shortfall",
+                "analysis": "A simple, encouraging analysis comparing the target ({expected_yield}) against typical yields for {crop_type} on {soil_type} with {irrigation_type} irrigation. Explain in friendly, plain terms what special attention, fertilizers, or soil care is needed to hit or get closest to this expected yield."
+            }},
             "crop_schedule": [
                 {{
                     "phase": "Land Preparation & Pre-sowing",
@@ -755,7 +933,9 @@ def gemini_schedule():
             ]
         }}
         
-        Ensure that all dates, dosages, and warnings are highly realistic for Indian agriculture and tailored to {acres} acres of land.
+        Ensure that all dates, dosages, and warnings are highly realistic for Indian agriculture, tailored to {acres} acres of land, and explicitly optimize for trying to reach the target yield of {expected_yield}. Use simple, farmer-friendly terminology. All yield projections and calculations MUST be written in Quintals (e.g. '15 Quintals / Acre' or '75 Quintals total') rather than tons or kilograms, to align with standard Indian agricultural metrics.
+        
+        CRITICAL: You MUST write the ENTIRE text content inside the JSON values (status, analysis, phase, timeline, activities, irrigation_advice, fertilizer_dosage, general_suggestions, soil_and_fertilizer_tips, and warnings) in {language_name}. Keep JSON keys strictly in English as defined above. Do not include any code fences or markdown blocks.
         """
 
         messages = [{"role": "user", "content": prompt}]
@@ -899,6 +1079,100 @@ def predict_msp():
         })
     except Exception as e:
         return jsonify({"error": f"Failed to predict MSP: {str(e)}"}), 500
+
+
+# --- NEWS UPDATES ENDPOINTS ---
+
+@app.route("/api/news", methods=["GET"])
+def get_news():
+    try:
+        news_list = NewsUpdate.query.order_by(NewsUpdate.published_date.desc()).all()
+        return jsonify([n.to_dict() for n in news_list])
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route("/api/news/<int:id>", methods=["GET"])
+def get_news_detail(id):
+    try:
+        news = NewsUpdate.query.get(id)
+        if news is None:
+            return jsonify({"error": "News update not found"}), 404
+        return jsonify(news.to_dict())
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route("/api/news/sync", methods=["POST"])
+def sync_news_endpoint():
+    try:
+        new_count = sync_pib_news()
+        log_activity(f"Synchronized news: {new_count} new articles loaded from PIB")
+        return jsonify({
+            "success": True,
+            "new_count": new_count,
+            "message": f"Successfully checked for new updates. Added {new_count} news items."
+        })
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route("/api/news", methods=["POST"])
+def create_news():
+    data = request.json
+    if not data or not data.get("title") or not data.get("content"):
+        return jsonify({"error": "Missing 'title' or 'content'"}), 400
+    
+    try:
+        new_news = NewsUpdate(
+            title=data["title"],
+            content=data["content"],
+            category=data.get("category", "General"),
+            published_date=datetime.now().strftime("%Y-%m-%d"),
+            source=data.get("source", "Admin Published"),
+            image_url=data.get("image_url") or "https://images.unsplash.com/photo-1523348837708-15d4a09cfac2?auto=format&fit=crop&q=80&w=800"
+        )
+        db.session.add(new_news)
+        db.session.commit()
+        log_activity(f"Created News Update: {new_news.title}")
+        return jsonify(new_news.to_dict()), 201
+    except Exception as e:
+        db.session.rollback()
+        return jsonify({"error": str(e)}), 400
+
+@app.route("/api/news/<int:id>", methods=["PUT"])
+def update_news(id):
+    news = NewsUpdate.query.get_or_404(id)
+    data = request.json or {}
+    
+    try:
+        if "title" in data:
+            news.title = data["title"]
+        if "content" in data:
+            news.content = data["content"]
+        if "category" in data:
+            news.category = data["category"]
+        if "source" in data:
+            news.source = data["source"]
+        if "image_url" in data:
+            news.image_url = data["image_url"]
+            
+        db.session.commit()
+        log_activity(f"Updated News Update: {news.title}")
+        return jsonify(news.to_dict())
+    except Exception as e:
+        db.session.rollback()
+        return jsonify({"error": str(e)}), 400
+
+@app.route("/api/news/<int:id>", methods=["DELETE"])
+def delete_news(id):
+    news = NewsUpdate.query.get_or_404(id)
+    title = news.title
+    try:
+        db.session.delete(news)
+        db.session.commit()
+        log_activity(f"Deleted News Update: {title}")
+        return jsonify({"message": f"News update '{title}' deleted successfully"})
+    except Exception as e:
+        db.session.rollback()
+        return jsonify({"error": str(e)}), 400
 
 
 if __name__ == "__main__":
