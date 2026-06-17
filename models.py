@@ -167,3 +167,54 @@ class NewsUpdate(db.Model):
             "source": self.source,
             "image_url": self.image_url
         }
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# USER AUTHENTICATION MODELS
+# ─────────────────────────────────────────────────────────────────────────────
+
+from datetime import datetime as _dt
+
+class User(db.Model):
+    __tablename__ = 'users'
+
+    id            = db.Column(db.Integer, primary_key=True)
+    name          = db.Column(db.String(120), nullable=False)
+    # At least one of email / phone must be provided (enforced in app logic)
+    email         = db.Column(db.String(150), nullable=True, unique=True)
+    phone         = db.Column(db.String(20),  nullable=True, unique=True)
+    password_hash = db.Column(db.String(255), nullable=False)
+    created_at    = db.Column(db.DateTime, default=_dt.utcnow)
+
+    activities = db.relationship(
+        'UserActivity', backref='user', lazy=True, cascade='all, delete-orphan'
+    )
+
+    def to_dict(self):
+        return {
+            "id":         self.id,
+            "name":       self.name,
+            "email":      self.email,
+            "phone":      self.phone,
+            "created_at": self.created_at.isoformat() if self.created_at else None
+        }
+
+
+class UserActivity(db.Model):
+    __tablename__ = 'user_activities'
+
+    id          = db.Column(db.Integer, primary_key=True)
+    user_id     = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=False)
+    action_type = db.Column(db.String(80),  nullable=False)   # e.g. "crop_viewed"
+    description = db.Column(db.String(255), nullable=False)   # human-readable label
+    extra       = db.Column(db.Text, nullable=True)           # JSON blob with extra info
+    created_at  = db.Column(db.DateTime, default=_dt.utcnow)
+
+    def to_dict(self):
+        return {
+            "id":          self.id,
+            "action_type": self.action_type,
+            "description": self.description,
+            "extra":       self.extra,
+            "created_at":  self.created_at.isoformat() if self.created_at else None
+        }

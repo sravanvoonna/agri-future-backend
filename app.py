@@ -3,18 +3,25 @@ import io
 import json
 import base64
 import requests
-from datetime import datetime
+import bcrypt
+import jwt
+from functools import wraps
+from datetime import datetime, timedelta, timezone
 from flask import Flask, jsonify, request
 from flask_cors import CORS
 from dotenv import load_dotenv
 from PIL import Image
 import google.generativeai as genai
 
-from models import db, State, Crop, Soil, CropSoil, Disease, Chemical, NewsUpdate
+from models import db, State, Crop, Soil, CropSoil, Disease, Chemical, NewsUpdate, User, UserActivity
 from seed import seed_database
 
 # Load environment variables
 load_dotenv(override=True)
+
+# JWT Configuration
+JWT_SECRET = os.getenv("JWT_SECRET", "agrifuture_jwt_secret_key_2024_change_me")
+JWT_EXPIRY_HOURS = 72  # token valid for 3 days
 
 # Configure Gemini API (Legacy fallback)
 gemini_api_key = os.getenv("GEMINI_API_KEY")
@@ -279,6 +286,151 @@ def index():
         "database": "MySQL" if database_url.startswith("mysql") else "SQLite",
         "timestamp": datetime.now().isoformat()
     })
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# AUTH HELPERS
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _make_token(user_id):
+    payload = {
+        "sub": user_id,
+        "iat": datetime.now(timezone.utc),
+        "exp": datetime.now(timezone.utc) + timedelta(hours=JWT_EXPIRY_HOURS)
+    }
+    return jwt.encode(payload, JWT_SECRET, algorithm="HS256")
+
+
+def require_token(f):
+    """Decorator: validates Bearer JWT and injects current_user into kwargs."""
+    @wraps(f)
+    def decorated(*args, **kwargs):
+        auth_header = request.headers.get("Authorization", "")
+        if not auth_header.startswith("Bearer "):
+            return jsonify({"error": "Missing or invalid Authorization header"}), 401
+        token = auth_header.split(" ", 1)[1]
+        try:
+            payload = jwt.decode(token, JWT_SECRET, algorithms=["HS256"])
+            user = User.query.get(payload["sub"])
+            if not user:
+                return jsonify({"error": "User not found"}), 401
+            kwargs["current_user"] = user
+        except jwt.ExpiredSignatureError:
+            return jsonify({"error": "Token expired, please log in again"}), 401
+        except jwt.InvalidTokenError:
+            return jsonify({"error": "Invalid token"}), 401
+        return f(*args, **kwargs)
+    return decorated
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# AUTH ENDPOINTS
+# ─────────────────────────────────────────────────────────────────────────────
+
+@app.route("/api/auth/register", methods=["POST"])
+def auth_register():
+    data = request.json or {}
+    name     = (data.get("name") or "").strip()
+    email    = (data.get("email") or "").strip().lower() or None
+    phone    = (data.get("phone") or "").strip() or None
+    password = data.get("password", "")
+
+    if not name:
+        return jsonify({"error": "Name is required"}), 400
+    if not email and not phone:
+        return jsonify({"error": "Email or phone number is required"}), 400
+    if len(password) < 6:
+        return jsonify({"error": "Password must be at least 6 characters"}), 400
+
+    # Check duplicates
+    if email and User.query.filter_by(email=email).first():
+        return jsonify({"error": "An account with this email already exists"}), 409
+    if phone and User.query.filter_by(phone=phone).first():
+        return jsonify({"error": "An account with this phone number already exists"}), 409
+
+    hashed = bcrypt.hashpw(password.encode(), bcrypt.gensalt()).decode()
+    user = User(name=name, email=email, phone=phone, password_hash=hashed)
+    db.session.add(user)
+    db.session.commit()
+
+    token = _make_token(user.id)
+    return jsonify({"token": token, "user": user.to_dict()}), 201
+
+
+@app.route("/api/auth/login", methods=["POST"])
+def auth_login():
+    data       = request.json or {}
+    identifier = (data.get("identifier") or "").strip()
+    password   = data.get("password", "")
+
+    if not identifier or not password:
+        return jsonify({"error": "Email/phone and password are required"}), 400
+
+    # Auto-detect: contains '@' → treat as email, else phone
+    if "@" in identifier:
+        user = User.query.filter_by(email=identifier.lower()).first()
+    else:
+        # Normalise phone (strip spaces/dashes)
+        phone_clean = "".join(filter(str.isdigit, identifier))
+        user = User.query.filter_by(phone=phone_clean).first()
+        if not user:
+            user = User.query.filter_by(phone=identifier).first()
+
+    if not user or not bcrypt.checkpw(password.encode(), user.password_hash.encode()):
+        return jsonify({"error": "Invalid credentials. Please check your email/phone and password."}), 401
+
+    token = _make_token(user.id)
+    return jsonify({"token": token, "user": user.to_dict()})
+
+
+@app.route("/api/auth/me", methods=["GET"])
+@require_token
+def auth_me(current_user):
+    return jsonify(current_user.to_dict())
+
+
+@app.route("/api/auth/activity", methods=["POST"])
+@require_token
+def auth_log_activity(current_user):
+    data = request.json or {}
+    action_type = data.get("action_type", "")
+    description = data.get("description", "")
+    extra       = data.get("extra")  # optional dict or string
+
+    if not action_type or not description:
+        return jsonify({"error": "action_type and description are required"}), 400
+
+    activity = UserActivity(
+        user_id=current_user.id,
+        action_type=action_type,
+        description=description,
+        extra=json.dumps(extra) if extra else None
+    )
+    db.session.add(activity)
+    db.session.commit()
+    return jsonify({"ok": True}), 201
+
+
+@app.route("/api/auth/history", methods=["GET"])
+@require_token
+def auth_history(current_user):
+    limit = min(int(request.args.get("limit", 50)), 200)
+    activities = (
+        UserActivity.query
+        .filter_by(user_id=current_user.id)
+        .order_by(UserActivity.created_at.desc())
+        .limit(limit)
+        .all()
+    )
+    return jsonify([a.to_dict() for a in activities])
+
+
+@app.route("/api/auth/history", methods=["DELETE"])
+@require_token
+def auth_clear_history(current_user):
+    UserActivity.query.filter_by(user_id=current_user.id).delete()
+    db.session.commit()
+    return jsonify({"ok": True, "message": "History cleared"})
 
 # --- ADMIN STATS & LOGS ---
 @app.route("/api/admin/stats", methods=["GET"])
@@ -712,6 +864,19 @@ def gemini_diagnose():
 
     image_file = request.files["image"]
     crop_name = request.form.get("crop_name", "unknown plant")
+    
+    language = request.args.get("lang") or request.form.get("language") or "en"
+    if language.startswith('hi'): language = 'hi'
+    elif language.startswith('te'): language = 'te'
+    elif language.startswith('mr'): language = 'mr'
+    
+    lang_map = {
+        "te": "Telugu (తెలుగు)",
+        "hi": "Hindi (हिन्दी)",
+        "mr": "Marathi (मराठी)",
+        "en": "English"
+    }
+    language_name = lang_map.get(language, "English")
 
     try:
         # Load image bytes
@@ -740,6 +905,8 @@ def gemini_diagnose():
             "application_method": "How to apply (e.g., Foliar Spray)",
             "safety_precautions": "Safety measures during application"
         }}
+        
+        CRITICAL: You MUST write the ENTIRE text content inside the JSON values (crop_name, disease_name, symptoms, causes, prevention, recommended_chemical, dosage, application_method, and safety_precautions) in {language_name}. Keep JSON keys strictly in English as defined above.
         """
 
         messages = [
@@ -799,13 +966,13 @@ def gemini_chat():
         You are 'CropCare AI', a very friendly, polite, clean, and sweet agricultural chatbot advisor for farmers in India.
         
         Dynamic Language Detection & Matching:
-        1. Always analyze the language the user is trying to speak in their message (English, Hindi, Telugu, etc.).
-        2. Respond back in the EXACT SAME language. If they ask in Hindi (using Devanagari or English characters/Hinglish), you MUST reply in Devanagari Hindi. If they ask in Telugu (using Telugu script or English characters/Telugish), you MUST reply in Telugu script. If they ask in English, reply in English.
+        1. Always analyze the language the user is trying to speak in their message (English, Hindi, Telugu, Marathi, etc.).
+        2. Respond back in the EXACT SAME language. If they ask in Hindi (using Devanagari or English characters/Hinglish), you MUST reply in Devanagari Hindi. If they ask in Telugu (using Telugu script or English characters/Telugish), you MUST reply in Telugu script. If they ask in Marathi (using Devanagari Marathi script or English characters/Marathish), you MUST reply in Devanagari Marathi. If they ask in English, reply in English.
         
         Slang and Tone Instructions (Sweet & Polite Slang):
         - Always use a sweet, warm, friendly, gentle, and neighborly tone.
-        - Start with warm, clean local greetings (e.g., in Hindi: 'राम राम भाई जी!' or 'नमस्ते प्यारे किसान भाई!', and in Telugu: 'నమస్తే అండీ! బాగున్నారా?').
-        - Avoid textbook translations; use natural, humanized, clean local farming slang (e.g., in Hindi use 'खाद' instead of 'उर्वरक', 'सिंचाई' instead of 'जल-आपूर्ति'; in Telugu, always use 'వరి పంట' instead of 'బియ్యం పంట', and use polite suffixes like 'అండీ' for respect).
+        - Start with warm, clean local greetings (e.g., in Hindi: 'राम राम भाई जी!' or 'नमस्ते प्यारे किसान भाई!', in Telugu: 'నమస్తే అండీ! బాగున్నారా?', and in Marathi: 'नमस्कार शेतकरी बंधूंनो! कसे आहात?').
+        - Avoid textbook translations; use natural, humanized, clean local farming slang (e.g., in Hindi use 'खाद' instead of 'उर्वरक', 'सिंचाई' instead of 'जल-आपूर्ति'; in Telugu, always use 'వరి పంట' instead of 'బియ్యం పంట', and use polite suffixes like 'అండీ' for respect; in Marathi, use natural local farming terms like 'खत' and 'उत्पादन').
         - Keep your instructions clear, practical, and highly encouraging.
         """
         
@@ -843,7 +1010,10 @@ def gemini_schedule():
     previous_crop = data.get("previous_crop")
     previous_yield = data.get("previous_yield")
     expected_yield = data.get("expected_yield")
-    language = data.get("language", "en")
+    language = request.args.get("lang") or data.get("language") or "en"
+    if language.startswith('hi'): language = 'hi'
+    elif language.startswith('te'): language = 'te'
+    elif language.startswith('mr'): language = 'mr'
 
     if not crop_type or not soil_type:
         return jsonify({"error": "Missing 'crop_type' or 'soil_type' parameters."}), 400
