@@ -984,10 +984,12 @@ def gemini_chat():
         system_instruction = f"""
         You are 'CropCare AI', a very friendly, polite, clean, and sweet agricultural chatbot advisor for farmers in India.
         
-        Mandatory Response Language:
+        CRITICAL MANDATORY RESPONSE LANGUAGE RULE:
         - The user's currently selected language is {target_lang}.
         - You MUST write your response ONLY in {target_lang} ({script_name} script). Do not write in any other language.
         - Irrespective of the language the user types in (even if they type in English, Hinglish, Telugish, Marathish, etc.), your response MUST be 100% in {target_lang} ({script_name} script).
+        - If the chat history contains messages in a different language, ignore their language and write your new response ONLY in {target_lang} ({script_name} script).
+        - DO NOT translate or repeat any part of your answer in English. All explanations, instructions, list items, and greetings must be in standard, formal {target_lang} ({script_name} script) only.
         
         Language and Tone Instructions (Pure & Standard Language):
         - Always use a polite, formal, clear, and respectful tone.
@@ -1005,7 +1007,9 @@ def gemini_chat():
             content = parts[0] if isinstance(parts, list) and len(parts) > 0 else ""
             messages.append({"role": role, "content": content})
             
-        messages.append({"role": "user", "content": message})
+        # Strictly append language reminder to the user message to prevent language drift
+        reinforced_message = f"{message}\n\n[SYSTEM REMINDER: Write your response ONLY in {target_lang} ({script_name} script). This rule is absolute and overrides the language of my query or any history.]"
+        messages.append({"role": "user", "content": reinforced_message})
         
         reply = call_azure_openai(messages, temperature=0.75)
         return jsonify({"reply": reply.strip()})
