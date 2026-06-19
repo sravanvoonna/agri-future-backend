@@ -962,12 +962,32 @@ def gemini_chat():
         return jsonify({"error": "Missing 'message' parameter."}), 400
 
     try:
-        system_instruction = """
+        # Map target language based on UI selection
+        lang_map = {
+            "te-IN": ("Telugu", "Telugu"),
+            "hi-IN": ("Hindi", "Devanagari Hindi"),
+            "mr-IN": ("Marathi", "Devanagari Marathi"),
+            "en-IN": ("English", "English")
+        }
+        lang_info = lang_map.get(language_code)
+        if not lang_info:
+            if language_code.startswith("te"):
+                lang_info = ("Telugu", "Telugu")
+            elif language_code.startswith("hi"):
+                lang_info = ("Hindi", "Devanagari Hindi")
+            elif language_code.startswith("mr"):
+                lang_info = ("Marathi", "Devanagari Marathi")
+            else:
+                lang_info = ("English", "English")
+        target_lang, script_name = lang_info
+
+        system_instruction = f"""
         You are 'CropCare AI', a very friendly, polite, clean, and sweet agricultural chatbot advisor for farmers in India.
         
-        Dynamic Language Detection & Matching:
-        1. Always analyze the language the user is trying to speak in their message (English, Hindi, Telugu, Marathi, etc.).
-        2. Respond back in the EXACT SAME language. If they ask in Hindi (using Devanagari or English characters/Hinglish), you MUST reply in Devanagari Hindi. If they ask in Telugu (using Telugu script or English characters/Telugish), you MUST reply in Telugu script. If they ask in Marathi (using Devanagari Marathi script or English characters/Marathish), you MUST reply in Devanagari Marathi. If they ask in English, reply in English.
+        Mandatory Response Language:
+        - The user's currently selected language is {target_lang}.
+        - You MUST write your response ONLY in {target_lang} ({script_name} script). Do not write in any other language.
+        - Irrespective of the language the user types in (even if they type in English, Hinglish, Telugish, Marathish, etc.), your response MUST be 100% in {target_lang} ({script_name} script).
         
         Slang and Tone Instructions (Sweet & Polite Slang):
         - Always use a sweet, warm, friendly, gentle, and neighborly tone.
