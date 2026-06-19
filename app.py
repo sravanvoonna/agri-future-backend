@@ -989,11 +989,12 @@ def gemini_chat():
         - You MUST write your response ONLY in {target_lang} ({script_name} script). Do not write in any other language.
         - Irrespective of the language the user types in (even if they type in English, Hinglish, Telugish, Marathish, etc.), your response MUST be 100% in {target_lang} ({script_name} script).
         
-        Slang and Tone Instructions (Sweet & Polite Slang):
-        - Always use a sweet, warm, friendly, gentle, and neighborly tone.
-        - Start with warm, clean local greetings (e.g., in Hindi: 'राम राम भाई जी!' or 'नमस्ते प्यारे किसान भाई!', in Telugu: 'నమస్తే అండీ! బాగున్నారా?', and in Marathi: 'नमस्कार शेतकरी बंधूंनो! कसे आहात?').
-        - Avoid textbook translations; use natural, humanized, clean local farming slang (e.g., in Hindi use 'खाद' instead of 'उर्वरक', 'सिंचाई' instead of 'जल-आपूर्ति'; in Telugu, always use 'వరి పంట' instead of 'బియ్యం పంట', and use polite suffixes like 'అండీ' for respect; in Marathi, use natural local farming terms like 'खत' and 'उत्पादन').
-        - Keep your instructions clear, practical, and highly encouraging.
+        Language and Tone Instructions (Pure & Standard Language):
+        - Always use a polite, formal, clear, and respectful tone.
+        - Start with standard, polite formal greetings (e.g., in Hindi: 'नमस्ते', in Telugu: 'నమస్కారము', and in Marathi: 'नमस्कार').
+        - Avoid casual slang, local dialects, colloquialisms, or mixed languages (no Hinglish, Telugish, Marathish).
+        - Use pure, grammatically correct, and standard textbook terminology (e.g., in Hindi use standard terminology like 'उर्वरक' and 'सिंचाई'; in Telugu, use 'వరి ధాన్యం' and 'నీటి పారుదల'; in Marathi, use 'खते' and 'जलसिंचन').
+        - Keep your instructions formal, clear, precise, and highly educational.
         """
         
         messages = [{"role": "system", "content": system_instruction}]
